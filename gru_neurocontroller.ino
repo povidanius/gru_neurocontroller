@@ -1,38 +1,40 @@
-// Gated recurrent unit (GRU) recurrent neural network neurocontroller
-// GRU can be trained externally e.g. on GPU
-// and uploaded via GRU::setParameters() method
 
-// code by Povilas Daniusis
-// povilas.daniusis@gmail.com
-// 
+#include <SD.h>
+#include <SPI.h>
 
+#define SIGMOID(x) 
 
 class GRU {
 private:
+  float *h; // state
+  float *u; // update gate
+  float *r; // reset gate
+  float *h_c; // candidate state
+
   float **Wu, **Uu, *bu;
   float **Wr, **Ur, *br;
-  float **Wc, **Uc, *bc;
-  float *h;
+  float **Wc, **Uc, *bc;  
+  
   int dim_input_;
   int dim_hidden_;
   
-  float* mulMatVec(float **M, float *x, int num_rows, int num_cols);
-  float* addVectors(float *x, float *y, int dim);
-  float* elementwiseMulVectors(float *x, float *y, int dim);
-  float* scaleShiftVector(float *x, float scale, float shift, int dim);
+  float* mulMatVec(float **M, float *x, int num_rows, int num_cols); 
   
+  void calculateUpdateGate(float *x);
+  void calculateResetGate(float *x);
+  void calculateCandidateState(float *x);
   
-  float sigmoidScalar(float x) { return (float) 1.0/(1.0 + exp(-x)); };
-  float *sigmoidVector(float *x, int dim) { float *ret = new float[dim]; for (int i = 0; i < dim; i++) ret[i] = sigmoidScalar(x[i]); return ret; }
+  float sigmoid(float x) { return (float) 1.0/(1.0 + exp(-x)); };
   
-  float tanh(float x){  return   (float) (exp(x) - exp(-x)) /(exp(x) + exp(-x)); };
-  float *tanhVector(float *x, int dim) { float *ret = new float[dim]; for (int i = 0; i < dim; i++) ret[i] = sigmoidScalar(x[i]); return ret; }
+  float th(float x){  return   (float) (exp(x) - exp(-x)) /(exp(x) + exp(-x)); };
   
   int created_;
   int active_;
   long step_;
   
 public:
+
+
  GRU(int dim_input, int dim_hidden);
  ~GRU();
  void setParameters(float *theta);
@@ -41,6 +43,7 @@ public:
  int getStateSize();
  int getInputSize();
  int getStatus();
+ long getStep() { return step_; }
  void setStatus(int status);
  
  
@@ -63,26 +66,39 @@ GRU::GRU(int dim_input, int dim_hidden) : created_(0), active_(0), step_(0)
    Ur = new float *[dim_hidden];   
    Uc = new float *[dim_hidden];
    
-   for (int i = 0; i < dim_input; i++)
+   for (int i = 0; i < dim_hidden; i++)
      {
        Wu[i] = new float[dim_input];
        Wr[i] = new float[dim_input];
-       Wc[i] = new float[dim_input];
-     }
-   for (int i = 0; i < dim_hidden; i++)
-     {  
-       Uu[i] = new float[dim_input];
-       Ur[i] = new float[dim_input];
-       Uc[i] = new float[dim_input];
+       Wc[i] = new float[dim_input]; 
+       Uu[i] = new float[dim_hidden];
+       Ur[i] = new float[dim_hidden];
+       Uc[i] = new float[dim_hidden];
      }  
     bu = new float[dim_hidden];
     br = new float[dim_hidden];
     bc = new float[dim_hidden];
+
+    u = new float[dim_hidden];
+    r = new float[dim_hidden];
+    h_c = new float[dim_hidden];
     h = new float[dim_hidden];
     
-    resetState();
     
-    created_ = 1;       
+    resetState();
+
+    float *theta = new float[getNumParameters()];
+
+    for (int i = 0; i < getNumParameters(); i++)
+      theta[i] = (float) 0.1;
+      
+    setParameters(theta);
+    
+    delete[] theta;
+    
+    
+    created_ = 1;     
+      
 }
 
 GRU::~GRU()
@@ -90,17 +106,19 @@ GRU::~GRU()
   delete[] bu;
   delete[] br;
   delete[] bc;
+  
+  delete[] u;
+  delete[] r;
+  delete[] h_c;
   delete[] h;
   
-     for (int i = 0; i < dim_input_; i++)
-     {
-         delete[] Wu[i];
-         delete[] Wr[i];
-         delete[] Wc[i];
-     } 
+
      
      for (int i = 0; i < dim_hidden_; i++)
      {  
+         delete[] Wu[i];
+         delete[] Wr[i];
+         delete[] Wc[i];
          delete[] Uu[i];
          delete[] Ur[i];
          delete[] Uc[i];
@@ -117,158 +135,73 @@ float *GRU::mulMatVec(float **M, float *x, int num_rows, int num_cols)
            ret[i] = 0.0;
           for (int j = 0; j < num_cols; j++)
            {
-               ret[i] += M[j][i] * x[i];
+               ret[i] += M[i][j] * x[i];
            }
          }
       return ret;    
 }
 
-float *GRU::addVectors(float *x, float *y, int dim)
-{
-  float *z = new float[dim];
-  for (int i = 0; i < dim; i++)
-   z[i] = x[i] + y[i];
-   return z;
-  
-}
-
-float *GRU::elementwiseMulVectors(float *x, float *y, int dim)
-{
-  float *ret = new float[dim];
-  
-  for (int i = 0; i < dim; i++)
-  {
-      ret[i] = x[i] * y[i];    
-  } 
-  
-  return ret;
-}
-
-float *GRU::scaleShiftVector(float *x, float scale, float shift, int dim)
-{
-  float *ret;  
-  
-  for (int i = 0 ; i < dim; i++)  
-    ret[i] = scale * x[i] + shift;
-    
-  return ret;      
-}
-
-
-
-
 void GRU::setParameters(float *theta)
 {
-  
-      for (int i = 0; i < dim_input_; i++)     
-          for (int j = 0; j < dim_hidden_; j++)
+           
+      for (int i = 0; i < dim_hidden_; i++)     
+      {
+          for (int j = 0; j < dim_input_; j++)
            {
               Wu[i][j] = *theta++;
-           }
-         for (int i = 0; i < dim_input_; i++)     
-          for (int j = 0; j < dim_hidden_; j++)
-           {
               Wr[i][j] = *theta++;
-           }    
-           
-         for (int i = 0; i < dim_input_; i++)     
-          for (int j = 0; j < dim_hidden_; j++)
-           {
               Wc[i][j] = *theta++;
-           }    
-           
-            for (int i = 0; i < dim_hidden_; i++)     
+           }                             
+         
           for (int j = 0; j < dim_hidden_; j++)
            {
               Uu[i][j] = *theta++;
-           }
-         for (int i = 0; i < dim_hidden_; i++)     
-          for (int j = 0; j < dim_hidden_; j++)
-           {
               Ur[i][j] = *theta++;
-           }    
+              Uc[i][j] = *theta++;
+           }            
+              bu[i] = *theta++;                      
+              br[i] = *theta++;
+              bc[i] = *theta++;
+       }        
+                 
            
-         for (int i = 0; i < dim_hidden_; i++)     
+}
+
+
+float *GRU::getParameters()
+{  
+   float *theta = new float[getNumParameters()];
+   unsigned int cc = 0;
+   
+   for (int i = 0; i < dim_hidden_; i++)     
+   {
+          for (int j = 0; j < dim_input_; j++)
+           {
+              theta[cc++] = Wu[i][j]; 
+              theta[cc++] = Wr[i][j];              
+              theta[cc++] = Wc[i][j];              
+           }
+  
           for (int j = 0; j < dim_hidden_; j++)
            {
-              Uc[i][j] = *theta++;
-           }    
+              theta[cc++] = Uu[i][j];              
+              theta[cc++] = Ur[i][j];              
+              theta[cc++] = Uc[i][j];                 
+           }
 
-        for (int i = 0; i < dim_hidden_; i++)                        
-              bu[i] = *theta++;    
-        for (int i = 0; i < dim_hidden_; i++)                        
-              br[i] = *theta++;     
-        for (int i = 0; i < dim_hidden_; i++)                        
-              bc[i] = *theta++;                
-           
+             theta[cc++] = bu[i];         
+             theta[cc++] = br[i];              
+             theta[cc++] = bc[i];
+                                              
+   }
+
+              
+  return theta;
 }
 
 int GRU::getNumParameters()
 {
   return 3 * dim_hidden_ * (dim_input_ + dim_hidden_ + 1);
-}
-
-float *GRU::getParameters()
-{  
-  float *theta = new float[getNumParameters()];
-  
-   for (int i = 0; i < dim_input_; i++)     
-          for (int j = 0; j < dim_hidden_; j++)
-           {
-              *theta = Wu[i][j];
-              theta++;
-           }
-         for (int i = 0; i < dim_input_; i++)     
-          for (int j = 0; j < dim_hidden_; j++)
-           {
-              *theta = Wr[i][j];
-              theta++;
-           }    
-           
-         for (int i = 0; i < dim_input_; i++)     
-          for (int j = 0; j < dim_hidden_; j++)
-           {
-              Wc[i][j] = *theta;
-              theta++;
-           }    
-           
-            for (int i = 0; i < dim_hidden_; i++)     
-          for (int j = 0; j < dim_hidden_; j++)
-           {
-              *theta = Uu[i][j];
-              theta++;
-           }
-         for (int i = 0; i < dim_hidden_; i++)     
-          for (int j = 0; j < dim_hidden_; j++)
-           {
-             *theta = Ur[i][j];
-             theta++;
-           }    
-           
-         for (int i = 0; i < dim_hidden_; i++)     
-          for (int j = 0; j < dim_hidden_; j++)
-           {
-              *theta = Uc[i][j];
-              theta++;
-           }    
-
-        for (int i = 0; i < dim_hidden_; i++, theta++)                        
-        {
-              *theta = bu[i];
-              
-        }
-        for (int i = 0; i < dim_hidden_; i++, theta++)                        
-        {
-              *theta = br[i] ;     
-        }
-        for (int i = 0; i < dim_hidden_; i++, theta++)                        
-        {
-            
-              *theta = bc[i];
-        }
-             
-              
-  return theta;
 }
 
 
@@ -306,175 +239,239 @@ int GRU::getInputSize()
 void GRU::resetState()
 {
   for (int i = 0; i < dim_hidden_; i++)
+  {
       h[i] = 0.0;
+      u[i] = 1.0;
+      r[i] = 1.0;
+      h_c[i] = 0.0;
+  }   
+}
+
+
+void GRU::calculateUpdateGate(float *x)
+{
+  float *Wux = mulMatVec(Wr, x, dim_hidden_, dim_input_);
+  float *Uuh = mulMatVec(Uu, h, dim_hidden_, dim_hidden_);
+  for (int i = 0; i < dim_hidden_; i++)
+    { 
+      u[i] = sigmoid(Wux[i] + Uuh[i] + bu[i]);
+    }
+
+  delete[] Wux;
+  delete[] Uuh;
+}
+
+void GRU::calculateResetGate(float *x)
+{
+  float *Wrx = mulMatVec(Wr, x, dim_hidden_, dim_input_);
+  float *Urh = mulMatVec(Ur, h, dim_hidden_, dim_hidden_);
+  for (int i = 0; i < dim_hidden_; i++)
+    { 
+      r[i] = sigmoid(Wrx[i] + Urh[i] + br[i]);
+    }
+
+  delete[] Wrx;
+  delete[] Urh;
+}
+
+void GRU::calculateCandidateState(float *x)
+{
+  float *Wcx = mulMatVec(Wc, x, dim_hidden_, dim_input_);
+  float *Uch = mulMatVec(Uc, h, dim_hidden_, dim_hidden_);
+  
+  for (int i = 0; i < dim_hidden_; i++)
+    { 
+      h_c[i] = th(Wcx[i] + Uch[i] * r[i] + bc[i]);
+    }
+    
+  delete[] Wcx;
+  delete[] Uch;
+    
 }
 
 void GRU::input(float *x)
 {
-   float *u =  addVectors( addVectors( mulMatVec(Wu, x, dim_hidden_, dim_input_) , mulMatVec(Uu, h, dim_hidden_, dim_hidden_), dim_hidden_), bu, dim_hidden_);
-   u = sigmoidVector(u, dim_hidden_);
-   
-   float *r =  addVectors( addVectors( mulMatVec(Wr, x, dim_hidden_, dim_input_) , mulMatVec(Ur, h, dim_hidden_, dim_hidden_), dim_hidden_), br, dim_hidden_);
-   r = sigmoidVector(r, dim_hidden_);
-   
-   float *c =  mulMatVec(Wc, x, dim_hidden_, dim_input_);
-   c = addVectors(c,  elementwiseMulVectors( mulMatVec(Uc, x, dim_hidden_, dim_input_), r, dim_hidden_), dim_hidden_);
-   c = addVectors(c, bc, dim_hidden_);  
-   c = tanhVector(c, dim_hidden_);
-   
-   
-   float *negu = scaleShiftVector(u, -1.0, 1.0, dim_hidden_);
-   h = addVectors( elementwiseMulVectors(h, u, dim_hidden_), elementwiseMulVectors(c, negu, dim_hidden_), dim_hidden_);   
+
+   calculateUpdateGate(x);
+   calculateResetGate(x);
+   calculateCandidateState(x);   
+  
+   for (int i = 0; i < dim_hidden_; i++)
+   {
+      h[i] = u[i] * h_c[i] + (1 - u[i])*h[i];
+   }   
+      
+
+   step_++;
 }
 
-//#define HWSERIAL Serial1
 
-#define INPUT_DIM 4
-#define HIDDEN_DIM 34
+#define INPUT_DIM 5
+#define HIDDEN_DIM 5
 #define OUTPUT_DIM 1
-
-int INPUT_PINS[] = {A2, A3, A10, A11};
-int OUTPUT_PINS[] = {A13};
-float input_data[INPUT_DIM];
-
 
 GRU gru(INPUT_DIM, HIDDEN_DIM);
 
 
-void resetState()
-{
-   gru.resetState(); 
-}
 
-void uploadParameters()
+// On the Ethernet Shield, CS is pin 4. Note that even if it's not
+// used as the CS pin, the hardware CS pin (10 on most Arduino boards,
+// 53 on the Mega) must be left as an output or the SD library
+// functions will not work.
+
+// change this to match your SD shield or module;
+// Arduino Ethernet shield: pin 4
+// Adafruit SD shields and modules: pin 10
+// Sparkfun SD shield: pin 8
+// Teensy audio board: pin 10
+// Teensy 3.5 & 3.6 on-board: BUILTIN_SDCARD
+// Wiz820+SD board: pin 4
+// Teensy 2.0: pin 0
+// Teensy++ 2.0: pin 20
+const int chipSelect =  BUILTIN_SDCARD;
+long int c = 0;
+
+void setup()
 {
-  int num_params = gru.getNumParameters();
-    
-  float *x = new float[num_params];
-   for (int i = 0; i < num_params; i++)
-   {
-     if (Serial.available())    
-       x[i] = Serial.parseFloat();       
-   } 
+  //UNCOMMENT THESE TWO LINES FOR TEENSY AUDIO BOARD:
+  //SPI.setMOSI(7);  // Audio shield has MOSI on pin 7
+  //SPI.setSCK(14);  // Audio shield has SCK on pin 14
+
   
-  gru.setParameters(x); 
-  delete[] x;  
+ // Open serial communications and wait for port to open:
+  Serial.begin(9600);
+
+  Serial.print("Initializing SD card...");
   
-  
-}
-
-void inputData()
-{
-  int input_size = gru.getInputSize();
-  float *x = new float[input_size];
-   for (int i = 0; i < input_size; i++)
-   {
-     if (Serial.available())    
-       x[i] = Serial.parseFloat();
-       
-   } 
-  
-  gru.input(x);  
-  delete[] x;  
-}
-
-
-void outputState()
-{
-   float *h = gru.getState();
-   for (int i = 0; i < gru.getStateSize(); i++)
-   {
-      Serial.print(h[i], DEC); 
-      Serial.print(" ");
-   }
-   Serial.println();
-   delete[] h;
-   
-}
-
-void activate()
-{
-   if (gru.getStatus() == 0)
-   {
-     gru.setStatus(1);
-   }
-  else
-  {
-     gru.setStatus(0);
-  } 
-     
-}
-
-
-void parseSerial() {
-  char c = Serial.read();
-
-  switch (c) {
-  case 'u': 
-    uploadParameters();
-    break;
-  case 'i': 
-    inputData();
-    break;
-  case 'o': 
-    outputState();
-    break;  
-  case 'r':
-    resetState();
-  break;  
-  case 'a':
-    activate();
-  break;
-  default:  
-  break;
+  // see if the card is present and can be initialized:
+  if (!SD.begin(chipSelect)) {
+    Serial.println("Card failed, or not present");
+    // don't do anything more:
+    return;
   }
+  Serial.println("card initialized.");
+/*  Serial.println("Reading parameters");
+
+   // open the file. note that only one file can be open at a time,
+  // so you have to close this one before opening another.
+  File dataFile = SD.open("parameters.txt");
+
+  // if the file is available, write to it:
+  if (dataFile) {
+    int numParameters = gru.getNumParameters();
+    for (int i = 0; i < gru.getNumParameters(); i++)
+    {
+      if (dataFile.available())
+      {
+        dataFile.read()
+      }      
+    }
+    //}
+    //while (dataFile.available()) {
+    //      Serial.write(dataFile.read());
+    //}
+    dataFile.close();
+  }  */
+
+  
+  
+  randomSeed(analogRead(0));
+  gru.setStatus(1);
+  Serial.print("Num parameters = ");
+  Serial.println(gru.getNumParameters());
+  
+  float *theta = gru.getParameters();
+  for (int i = 0; i < gru.getNumParameters(); i++)
+  { 
+    Serial.print(i);
+    Serial.print(" ");  
+    Serial.println(theta[i]);    
+  }
+  delete[] theta;
+  
+
+  Serial.println();
+  
+  
 }
 
 
+void loop()
+{
 
-void setup() {
-  
-        gru.setStatus(0);
-        
-	Serial.begin(115200);
-  
-        for (int i = 0; i < INPUT_DIM; i++)
-        {
-         pinMode(INPUT_PINS[i], INPUT); 
-        } 
-        
-        for (int i = 0; i < OUTPUT_DIM; i++)
-        {
-          pinMode(OUTPUT_PINS[i], OUTPUT); 
-        }       
-}
-
-
-void loop() {  
-  
-  if (gru.getStatus())
-  {
+    float input_data[INPUT_DIM];
+    //Serial.print(gru.getStep());
+    //Serial.print(" ");
+    
     for (int i = 0; i < INPUT_DIM; i++)
     {
-      input_data[i] = (float) analogRead(INPUT_PINS[i]);
+      input_data[i] = (float) random(300)/ 299;       
+     // Serial.print(input_data[i]);
+      //Serial.print(" ");
     }  
+    //Serial.println();
+    
   
     gru.input(input_data);
-    float *h = gru.getState();
-    
- /*   for (int i = 0; i < OUTPUT_DIM; i++)
+
+    float *h = gru.getState();    
+    for (int i = 0; i < HIDDEN_DIM; i++)
     {
-        analogWrite(OUTPUT_PINS[i], h[i]);
-    }*/
+      Serial.print(h[i]);
+      Serial.print(" ");
+    }
+    Serial.println();   
     
-    delete[] h;
+
+    
+    
+    
+ /* }
+  else
+  {
+    Serial.println("Waiting ... ");
+  }
+  */
+
+  
+  /*
+  // make a string for assembling the data to log:
+  String dataString = "";
+
+  // read three sensors and append to the string:
+  for (int analogPin = 0; analogPin < 3; analogPin++) {
+    int sensor = analogRead(analogPin);
+    dataString += String(sensor);
+    if (analogPin < 2) {
+      dataString += ","; 
+    }
+  }
+
+  // open the file. note that only one file can be open at a time,
+  // so you have to close this one before opening another.
+  File dataFile = SD.open("datalog.txt", FILE_WRITE);
+
+  // if the file is available, write to it:
+  if (dataFile) {
+    dataFile.println(dataString);
+    dataFile.close();
+    // print to the serial port too:
+    Serial.println(dataString);
   }  
-  
-  
-  if (Serial.available()) parseSerial();
+  // if the file isn't open, pop up an error:
+  else {
+    Serial.println("error opening datalog.txt");
+  } */
 
-
+ // Serial.println();
+  
 }
+
+
+
+
+
+
 
 
 
